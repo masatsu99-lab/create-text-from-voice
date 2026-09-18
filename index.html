@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#111418">
+<title>英日リアルタイム字幕（対面用）</title>
+<link rel="manifest" href="manifest.json">
+<link rel="icon" href="icon-192.png">
+<link rel="apple-touch-icon" href="icon-192.png">
+<style>
+  :root {
+    --bg: #111418; --panel: #1b2027; --line: #2c333d; --fg: #e8ecf1; --dim: #8b97a6;
+    --en: #9ccbff; --ja: #ffffff; --warn: #ffb454; --err: #ff6b6b; --ok: #6fd18a; --accent: #3b82f6;
+    --font: 18px;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--fg);
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Noto Sans JP", sans-serif; }
+  body { display: flex; flex-direction: column; height: 100dvh; overflow: hidden; }
+  header { display: flex; align-items: center; gap: 8px; padding: 8px 12px; background: var(--panel);
+    border-bottom: 1px solid var(--line); font-size: 13px; color: var(--dim);
+    padding-top: calc(8px + env(safe-area-inset-top)); }
+  header .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--dim); flex: none; }
+  header .dot.on { background: var(--ok); }
+  header .dot.warn { background: var(--warn); }
+  header .dot.err { background: var(--err); }
+  header #status { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  header #timer { font-variant-numeric: tabular-nums; }
+  #level { width: 40px; height: 6px; background: var(--line); border-radius: 3px; overflow: hidden; }
+  #level i { display: block; height: 100%; width: 0; background: var(--ok); }
+  main { flex: 1; overflow-y: auto; padding: 12px 16px; display: flex; flex-direction: column; gap: 10px;
+    font-size: var(--font); line-height: 1.45; -webkit-overflow-scrolling: touch; }
+  main::before { content: ""; flex: 1; } /* 字幕を画面下側（親指に近い側）へ寄せる */
+  .utt { border-left: 3px solid var(--line); padding-left: 10px; }
+  .utt .t { font-size: 11px; color: var(--dim); font-variant-numeric: tabular-nums; }
+  .utt .en { color: var(--en); }
+  .utt .ja { color: var(--ja); }
+  .utt .ja.pending { color: var(--dim); font-style: italic; }
+  .utt.src-ja .en { display: none; }
+  body.mode-ja .utt .en { display: none; }
+  body.mode-en .utt .ja { display: none; }
+  body.mode-en .utt.src-ja .en { display: block; }
+  #interim { color: var(--dim); font-style: italic; min-height: 1.4em; }
+  .sys { color: var(--warn); font-size: 13px; }
+  .sys.err { color: var(--err); }
+  footer { background: var(--panel); border-top: 1px solid var(--line); padding: 8px 12px;
+    padding-bottom: calc(8px + env(safe-area-inset-bottom)); display: flex; gap: 8px; flex-wrap: wrap; }
+  button { background: #2a323d; color: var(--fg); border: 1px solid var(--line); border-radius: 8px;
+    padding: 10px 14px; font-size: 15px; cursor: pointer; touch-action: manipulation; }
+  button:disabled { opacity: .45; }
+  button.primary { background: var(--accent); border-color: var(--accent); font-weight: 600; flex: 1; }
+  button.stop { background: #b42318; border-color: #b42318; }
+  button.small { padding: 6px 10px; font-size: 13px; }
+  dialog { background: var(--panel); color: var(--fg); border: 1px solid var(--line); border-radius: 12px;
+    width: min(96vw, 560px); max-height: 92dvh; padding: 0; }
+  dialog::backdrop { background: rgba(0,0,0,.6); }
+  dialog .body { padding: 16px; overflow-y: auto; max-height: calc(92dvh - 60px); }
+  dialog h2 { margin: 0 0 12px; font-size: 17px; }
+  dialog label { display: block; margin: 12px 0 4px; font-size: 13px; color: var(--dim); }
+  dialog input[type=text], dialog input[type=password], dialog input[type=number], dialog select, dialog textarea {
+    width: 100%; background: #0f1317; color: var(--fg); border: 1px solid var(--line); border-radius: 6px;
+    padding: 8px; font-size: 15px; font-family: inherit; }
+  dialog textarea { min-height: 140px; font-family: ui-monospace, Consolas, monospace; font-size: 13px; }
+  dialog .row { display: flex; gap: 8px; align-items: center; }
+  dialog .row label { margin: 0; }
+  dialog .actions { display: flex; gap: 8px; justify-content: flex-end; padding: 12px 16px; border-top: 1px solid var(--line); }
+  dialog small { color: var(--dim); display: block; margin-top: 4px; font-size: 12px; line-height: 1.4; }
+  #log { font-family: ui-monospace, Consolas, monospace; font-size: 12px; white-space: pre-wrap; color: var(--dim);
+    max-height: 40dvh; overflow-y: auto; background: #0f1317; padding: 8px; border-radius: 6px; }
+  .session { display: flex; justify-content: space-between; align-items: center; gap: 8px; padding: 8px 0;
+    border-bottom: 1px solid var(--line); font-size: 14px; }
+  .session .meta { color: var(--dim); font-size: 12px; }
+</style>
+</head>
+<body class="mode-both">
+<header>
+  <span class="dot" id="dot"></span>
+  <span id="status">停止中</span>
+  <span id="level"><i></i></span>
+  <span id="timer">00:00:00</span>
+</header>
+<main id="captions">
+  <div id="interim"></div>
+</main>
+<footer>
+  <button id="btnStart" class="primary">字幕開始</button>
+  <button id="btnMode" title="表示切替">英日</button>
+  <button id="btnFontDown" class="small">A−</button>
+  <button id="btnFontUp" class="small">A＋</button>
+  <button id="btnSessions" class="small">保存済み</button>
+  <button id="btnSettings" class="small">設定</button>
+  <button id="btnLog" class="small">ログ</button>
+</footer>
+
+<dialog id="dlgSettings">
+  <div class="body">
+    <h2>設定</h2>
+    <label>Gemini APIキー</label>
+    <input type="password" id="apiKey" autocomplete="off" placeholder="AIza...">
+    <small>この端末のブラウザ内にだけ保存されます。Google AI Studioで発行したキーを貼り付けてください。</small>
+    <label>会議の言語</label>
+    <select id="meetingLanguage">
+      <option value="auto">日英混在（発言ごとに自動判定）</option>
+      <option value="en">英語のみ</option>
+      <option value="ja">日本語のみ（翻訳しない）</option>
+    </select>
+    <label>専門用語・対訳集（1行1件。「英語 = 日本語」で訳語固定）</label>
+    <textarea id="glossary" placeholder="Asahi Life = 朝日生命&#10;Reza&#10;Minh"></textarea>
+    <div class="row" style="margin-top:6px">
+      <button class="small" id="btnGlossaryFile" type="button">ファイルから読み込む</button>
+      <input type="file" id="glossaryFile" accept=".txt,text/plain" style="display:none">
+      <small style="margin:0">PC版の Teams字幕_専門用語.txt をGoogleドライブから選べます。</small>
+    </div>
+    <label>文字起こしモデル（Live API）</label>
+    <input type="text" id="transcribeModel">
+    <label>翻訳モデル（優先順にカンマ区切り。無料枠切れで次へ自動切替）</label>
+    <input type="text" id="translateModels">
+    <label>発話終了と判定する無音時間（ms）</label>
+    <input type="number" id="vadSilence" min="200" max="3000" step="100">
+    <small>短いと文の途中で確定しやすく、長いと字幕が出るまで遅くなります。PC版の既定は800。</small>
+    <div class="row" style="margin-top:12px">
+      <input type="checkbox" id="recordAudio"><label for="recordAudio">録音（meeting_audio.wav）も保存する</label>
+    </div>
+    <div class="row" style="margin-top:8px">
+      <input type="checkbox" id="keepAwake"><label for="keepAwake">字幕中は画面を消灯しない</label>
+    </div>
+  </div>
+  <div class="actions">
+    <button id="btnSettingsCancel">閉じる</button>
+    <button id="btnSettingsSave" class="primary" style="flex:0 1 auto">保存</button>
+  </div>
+</dialog>
+
+<dialog id="dlgSessions">
+  <div class="body">
+    <h2>保存済みセッション</h2>
+    <small style="margin-bottom:8px">端末内に残っている字幕・録音です。「共有」でGoogleドライブの「会議」フォルダへ送ると、PC版の議事録作成が使えます。zipを展開すると日時名のフォルダになります。</small>
+    <div id="sessionList"></div>
+  </div>
+  <div class="actions"><button id="btnSessionsClose">閉じる</button></div>
+</dialog>
+
+<dialog id="dlgLog">
+  <div class="body">
+    <h2>ログ</h2>
+    <div id="log"></div>
+  </div>
+  <div class="actions">
+    <button id="btnLogCopy">コピー</button>
+    <button id="btnLogClose">閉じる</button>
+  </div>
+</dialog>
+
+<script src="app.js"></script>
+</body>
+</html>
