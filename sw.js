@@ -1,6 +1,6 @@
 // アプリの骨組みだけをキャッシュする（API通信はキャッシュしない）。
 // 更新を配布するときは VERSION を上げる。
-const VERSION = 'v1.0.1';
+const VERSION = 'v1.0.2';
 const CACHE = `subtitles-${VERSION}`;
 const SHELL = ['./', './index.html', './app.js', './pcm-worklet.js', './manifest.json', './icon-192.png', './icon-512.png'];
 

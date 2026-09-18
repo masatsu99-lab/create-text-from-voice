@@ -662,32 +662,41 @@ function transcriptText(records) {
 async function exportSession(id) {
   const enc = new TextEncoder();
   const utterances = (await idbGetAllRange('utterances', id)).map(utteranceRecord);
+  const txtBytes = enc.encode(transcriptText(utterances));
   const files = [
-    { name: 'transcript.txt', chunks: [enc.encode(transcriptText(utterances))] },
+    { name: 'transcript.txt', chunks: [txtBytes] },
     { name: 'transcript.jsonl', chunks: [enc.encode(utterances.map((r) => JSON.stringify(r)).join('\n') + (utterances.length ? '\n' : ''))] },
   ];
   const audio = await idbGetAllRange('audio', id);
+  let wav = null;
   if (audio.length) {
     const chunks = audio.map((a) => new Uint8Array(a.data));
     const total = chunks.reduce((s, c) => s + c.length, 0);
     files.push({ name: 'meeting_audio.wav', chunks: [wavHeader(total), ...chunks] });
+    wav = new File([wavHeader(total), ...chunks], `${id}_meeting_audio.wav`, { type: 'audio/wav' });
   }
-  return new File([buildZip(files, id)], `${id}.zip`, { type: 'application/zip' });
+  return {
+    zip: new File([buildZip(files, id)], `${id}.zip`, { type: 'application/zip' }),
+    txt: new File([txtBytes], `${id}_transcript.txt`, { type: 'text/plain' }),
+    wav,
+  };
 }
-// navigator.share は「ユーザーのタップ直後」にしか呼べない（数秒で権限が切れ NotAllowedError になる）。
-// そのため zip は先に作っておき、共有ボタンのタップ時には作成済みの File を渡すだけにする。
-const exportCache = new Map(); // sessionId → File
+// 共有(navigator.share)の制約:
+//   1. 「ユーザーのタップ直後」にしか呼べない（数秒で権限が切れ NotAllowedError）→ File は先に作っておく
+//   2. Android Chrome は共有できる拡張子を限定しており、.zip / .jsonl は不可（.txt / .wav は可）
+//      → 共有は transcript.txt と meeting_audio.wav のみ。完全一式（jsonl含む）は zip のダウンロードで渡す。
+const exportCache = new Map(); // sessionId → {zip, txt, wav}
 async function prepareExport(id) {
   if (!exportCache.has(id)) exportCache.set(id, await exportSession(id));
   return exportCache.get(id);
 }
-function shareFile(file) {
-  if (navigator.canShare && navigator.canShare({ files: [file] })) {
-    return navigator.share({ files: [file], title: file.name })
-      .catch((e) => { if (e.name !== 'AbortError') { log(`共有に失敗: ${e}。ダウンロードに切り替えます。`, 'warn'); downloadFile(file); } });
+function shareFiles(files) {
+  const list = files.filter(Boolean);
+  if (navigator.canShare && navigator.canShare({ files: list })) {
+    return navigator.share({ files: list, title: list[0].name })
+      .catch((e) => { if (e.name !== 'AbortError') log(`共有に失敗: ${e}。「zipをDL」を使い、Chromeのダウンロード一覧の共有からドライブへ送ってください。`, 'warn'); });
   }
-  log('この環境ではファイル共有が使えないためダウンロードします。');
-  downloadFile(file);
+  log('この環境ではファイル共有が使えません。「zipをDL」を使ってください。', 'warn');
   return Promise.resolve();
 }
 function downloadFile(file) {
@@ -697,15 +706,15 @@ function downloadFile(file) {
   setTimeout(() => URL.revokeObjectURL(url), 60000);
 }
 // 停止直後に字幕欄へ出す「共有／ダウンロード」ボタン行
-function showExportButtons(id, file) {
+function showExportButtons(id, ex) {
   const row = document.createElement('div');
   row.className = 'sys';
   row.style.display = 'flex'; row.style.gap = '8px'; row.style.alignItems = 'center'; row.style.flexWrap = 'wrap';
   const label = document.createElement('span');
-  label.textContent = `${id}.zip（${(file.size / 1048576).toFixed(1)} MB）`;
+  label.textContent = `${id}（zip ${(ex.zip.size / 1048576).toFixed(1)} MB）`;
   const share = document.createElement('button'); share.className = 'small primary'; share.style.flex = '0 1 auto';
-  share.textContent = 'ドライブへ共有'; share.onclick = () => shareFile(file);
-  const dl = document.createElement('button'); dl.className = 'small'; dl.textContent = 'ダウンロード'; dl.onclick = () => downloadFile(file);
+  share.textContent = '字幕＋録音を共有'; share.onclick = () => shareFiles([ex.txt, ex.wav]);
+  const dl = document.createElement('button'); dl.className = 'small'; dl.textContent = 'zipをDL'; dl.onclick = () => downloadFile(ex.zip);
   row.append(label, share, dl);
   $('captions').insertBefore(row, $('interim'));
   scrollToBottom();
@@ -953,8 +962,8 @@ async function renderSessions() {
     const btns = document.createElement('div');
     const mk = (label, fn) => { const b = document.createElement('button'); b.className = 'small'; b.textContent = label; b.onclick = fn; btns.appendChild(b); };
     if (exportCache.has(s.id)) {
-      mk('共有', () => shareFile(exportCache.get(s.id)));
-      mk('DL', () => downloadFile(exportCache.get(s.id)));
+      mk('共有', () => shareFiles([exportCache.get(s.id).txt, exportCache.get(s.id).wav]));
+      mk('zipをDL', () => downloadFile(exportCache.get(s.id).zip));
     } else {
       // zip作成に時間がかかると共有権限が切れるため、先に「準備」で作ってから共有ボタンを出す
       mk('準備', async (ev) => { ev.target.disabled = true; ev.target.textContent = '作成中…'; await prepareExport(s.id); renderSessions(); });
