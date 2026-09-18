@@ -199,6 +199,7 @@ function idbGetAllRange(store, session) {
   });
 }
 async function deleteSession(id) {
+  exportCache.delete(id);
   await idb('sessions', 'readwrite', (s) => s.delete(id));
   for (const store of ['utterances', 'audio']) {
     await new Promise((resolve, reject) => {
@@ -673,15 +674,41 @@ async function exportSession(id) {
   }
   return new File([buildZip(files, id)], `${id}.zip`, { type: 'application/zip' });
 }
-async function shareOrDownload(file, preferShare) {
-  if (preferShare && navigator.canShare && navigator.canShare({ files: [file] })) {
-    try { await navigator.share({ files: [file], title: file.name }); return; }
-    catch (e) { if (e.name === 'AbortError') return; log(`共有に失敗: ${e}`, 'warn'); }
+// navigator.share は「ユーザーのタップ直後」にしか呼べない（数秒で権限が切れ NotAllowedError になる）。
+// そのため zip は先に作っておき、共有ボタンのタップ時には作成済みの File を渡すだけにする。
+const exportCache = new Map(); // sessionId → File
+async function prepareExport(id) {
+  if (!exportCache.has(id)) exportCache.set(id, await exportSession(id));
+  return exportCache.get(id);
+}
+function shareFile(file) {
+  if (navigator.canShare && navigator.canShare({ files: [file] })) {
+    return navigator.share({ files: [file], title: file.name })
+      .catch((e) => { if (e.name !== 'AbortError') { log(`共有に失敗: ${e}。ダウンロードに切り替えます。`, 'warn'); downloadFile(file); } });
   }
+  log('この環境ではファイル共有が使えないためダウンロードします。');
+  downloadFile(file);
+  return Promise.resolve();
+}
+function downloadFile(file) {
   const url = URL.createObjectURL(file);
   const a = document.createElement('a');
   a.href = url; a.download = file.name; document.body.appendChild(a); a.click(); a.remove();
   setTimeout(() => URL.revokeObjectURL(url), 60000);
+}
+// 停止直後に字幕欄へ出す「共有／ダウンロード」ボタン行
+function showExportButtons(id, file) {
+  const row = document.createElement('div');
+  row.className = 'sys';
+  row.style.display = 'flex'; row.style.gap = '8px'; row.style.alignItems = 'center'; row.style.flexWrap = 'wrap';
+  const label = document.createElement('span');
+  label.textContent = `${id}.zip（${(file.size / 1048576).toFixed(1)} MB）`;
+  const share = document.createElement('button'); share.className = 'small primary'; share.style.flex = '0 1 auto';
+  share.textContent = 'ドライブへ共有'; share.onclick = () => shareFile(file);
+  const dl = document.createElement('button'); dl.className = 'small'; dl.textContent = 'ダウンロード'; dl.onclick = () => downloadFile(file);
+  row.append(label, share, dl);
+  $('captions').insertBefore(row, $('interim'));
+  scrollToBottom();
 }
 
 // ------------------------------------------------------------------ セッション（画面・録音・保存の統括）
@@ -887,8 +914,8 @@ async function stopSession() {
   const id = state.sessionId;
   state.transcriber = null; state.translator = null;
   if (state.seq > 0) {
-    showSystem('字幕を端末に保存しました。「保存済み」から共有・ダウンロードできます。', 'info');
-    try { await shareOrDownload(await exportSession(id), true); } catch (e) { log(`書き出しに失敗: ${e}`, 'warn'); }
+    showSystem('字幕を端末に保存しました。下のボタンでGoogleドライブの「会議」フォルダへ送れます（「保存済み」からも後で可能）。', 'info');
+    try { showExportButtons(id, await prepareExport(id)); } catch (e) { log(`書き出しに失敗: ${e}`, 'warn'); }
   }
 }
 
@@ -925,8 +952,13 @@ async function renderSessions() {
     info.innerHTML = `<div>${s.id}${s.id === state.sessionId && state.running ? '（進行中）' : ''}</div><div class="meta">${count}発話 / 録音 ${(bytes / 1048576).toFixed(1)} MB</div>`;
     const btns = document.createElement('div');
     const mk = (label, fn) => { const b = document.createElement('button'); b.className = 'small'; b.textContent = label; b.onclick = fn; btns.appendChild(b); };
-    mk('共有', async () => shareOrDownload(await exportSession(s.id), true));
-    mk('DL', async () => shareOrDownload(await exportSession(s.id), false));
+    if (exportCache.has(s.id)) {
+      mk('共有', () => shareFile(exportCache.get(s.id)));
+      mk('DL', () => downloadFile(exportCache.get(s.id)));
+    } else {
+      // zip作成に時間がかかると共有権限が切れるため、先に「準備」で作ってから共有ボタンを出す
+      mk('準備', async (ev) => { ev.target.disabled = true; ev.target.textContent = '作成中…'; await prepareExport(s.id); renderSessions(); });
+    }
     if (!(s.id === state.sessionId && state.running)) mk('削除', async () => { if (confirm(`${s.id} を端末から削除しますか？`)) { await deleteSession(s.id); renderSessions(); } });
     row.append(info, btns);
     list.appendChild(row);
